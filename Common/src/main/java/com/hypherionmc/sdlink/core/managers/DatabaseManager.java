@@ -27,6 +27,7 @@ public final class DatabaseManager {
         if (database.initialize()) {
             SDLinkConstants.LOGGER.info("Migrated {} accounts and {} hidden players to SQLite. Legacy JSON files were retained as backups.",
                     database.allAccounts().size(), database.allHiddenPlayers().size());
+            SDLinkConstants.LOGGER.warn("Pending verification codes from JSON were invalidated because their issue times are unknown. Affected players must request a new code.");
         }
     }
 

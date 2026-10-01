@@ -49,6 +49,7 @@ public final class SqliteDatabaseIntegrationTest {
         String firstId = null;
         String secondId = null;
         String thirdId = null;
+        String fourthId = null;
         for (int i = 0; i < 5000; i++) {
             SDLinkAccount account = new SDLinkAccount();
             account.setUuid(UUID.nameUUIDFromBytes(("player-" + i).getBytes(StandardCharsets.UTF_8)).toString());
@@ -63,6 +64,7 @@ public final class SqliteDatabaseIntegrationTest {
                 account.setDiscordID("existing-link");
             }
             if (i == 2) thirdId = account.getUuid();
+            if (i == 3) fourthId = account.getUuid();
             legacy.append(gson.toJson(account)).append('\n');
         }
         Path accountsFile = folder.resolve("verifiedaccounts.json");
@@ -79,11 +81,27 @@ public final class SqliteDatabaseIntegrationTest {
         check(Files.readString(accountsFile).equals(legacy.toString()), "Legacy backup must remain untouched");
 
         String code = db.getOrCreateCode(firstId);
+        String firstAccountId = firstId;
         check(code.matches("[1-9][0-9]{3}"), "Code must remain four digits");
         check(code.equals(db.getOrCreateCode(firstId)), "Active code must be reused");
         check(db.findAccountByCode(code).getUuid().equals(firstId), "Code lookup must find its account");
+        check(code.equals(db.findAccount(firstId).getVerifyCode()), "Account reads must expose active codes");
+        check(db.allAccounts().stream().anyMatch(a -> a.getUuid().equals(firstAccountId) && code.equals(a.getVerifyCode())),
+                "Collection reads must expose active codes");
         String otherCode = db.getOrCreateCode(thirdId);
         check(!code.equals(otherCode), "Pending codes must be unique");
+
+        SDLinkAccount publicUpdate = db.findAccount(fourthId);
+        publicUpdate.setDiscordID("public-link");
+        publicUpdate.setVerifyCode("0001");
+        db.upsertAccount(publicUpdate);
+        check("public-link".equals(db.findAccount(fourthId).getDiscordID()), "Public update must persist a Discord link");
+        check("0001".equals(db.findAccount(fourthId).getVerifyCode()), "Public update must persist a pending code");
+        publicUpdate.setDiscordID(null);
+        publicUpdate.setVerifyCode(null);
+        db.upsertAccount(publicUpdate);
+        check(db.findAccount(fourthId).getDiscordID() == null, "Public update must clear a Discord link");
+        check(db.findAccount(fourthId).getVerifyCode() == null, "Public update must clear a pending code");
 
         try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + folder.resolve("sdlink.db"));
              PreparedStatement statement = connection.prepareStatement("SELECT expires_at FROM pending_verifications WHERE code = ?")) {
@@ -95,17 +113,17 @@ public final class SqliteDatabaseIntegrationTest {
             }
         }
 
+        SDLinkAccount stale = db.findAccount(firstId);
         check(db.linkAccount(firstId, "new-link", code, false) == SqliteDatabase.LinkStatus.SUCCESS, "Valid code must link");
         check(db.findAccountByCode(code) == null, "Consumed code must be removed");
         check(db.linkAccount(thirdId, "new-link", otherCode, false) == SqliteDatabase.LinkStatus.ALREADY_VERIFIED,
                 "Multiple-account rule must still be enforced");
         check(db.findAccountByCode(otherCode) != null, "Rejected link must leave its code available");
         check(db.linkAccount(secondId, "new-link", null, true) == SqliteDatabase.LinkStatus.SUCCESS, "Staff link must work");
-        SDLinkAccount stale = db.findAccount(firstId);
-        stale.setDiscordID(null);
         stale.setInGameName("New display name");
         db.upsertAccount(stale);
         check("new-link".equals(db.findAccount(firstId).getDiscordID()), "Name update must not erase Discord link");
+        check(db.findAccount(firstId).getVerifyCode() == null, "Name update must not restore a consumed code");
 
         db.unlinkAccounts("new-link");
         check(db.findAccount(firstId).getDiscordID() == null, "Unlink must clear first account");

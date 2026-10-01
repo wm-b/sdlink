@@ -9,6 +9,7 @@
 
 **Changes**:
 
+- Existing account links and hidden players migrate automatically from JSON to SQLite. Pending verification codes from JSON are invalidated because their issue times are unknown; affected players must request a new code. Existing configuration files need no changes.
 - Added official config toggle to ignore canceled chat events (fixes compat with mods like FTB Teams, etc). Requires CraterLib update - HypherionSA
 - Add config toggle to relay commands used by hidden players. Disabled by default - HypherionSA
 

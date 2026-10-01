@@ -16,3 +16,5 @@ tasks.register('storageIntegrationTest', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.hypherionmc.sdlink.core.database.SqliteDatabaseIntegrationTest'
 }
+
+check.dependsOn storageIntegrationTest

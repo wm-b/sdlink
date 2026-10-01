@@ -41,50 +41,18 @@ public final class SqliteDatabase {
         }
 
         boolean existingDatabase = databaseFile.exists();
-        boolean migrated = false;
         try {
             Class.forName("org.sqlite.JDBC");
         } catch (ClassNotFoundException e) {
             throw new IllegalStateException("SQLite JDBC driver is missing", e);
         }
 
-        try (Connection connection = connect()) {
-            connection.setAutoCommit(false);
-            try {
-                createSchema(connection);
-                if (!migrationComplete(connection)) {
-                    File accountsFile = new File(folder, "verifiedaccounts.json");
-                    File hiddenFile = new File(folder, "hiddenplayers.json");
-                    if (accountsFile.exists()) {
-                        importAccounts(connection, accountsFile);
-                        if (hiddenFile.exists()) importHiddenPlayers(connection, hiddenFile);
-                        migrated = true;
-                    } else if (hiddenFile.exists()) {
-                        throw new IllegalStateException("Legacy hidden players exist but verifiedaccounts.json is missing");
-                    } else if (existingDatabase) {
-                        try (Statement statement = connection.createStatement();
-                             ResultSet rows = statement.executeQuery("SELECT (SELECT COUNT(*) FROM accounts) + (SELECT COUNT(*) FROM hidden_players)")) {
-                            if (rows.next() && rows.getInt(1) != 0)
-                                throw new IllegalStateException("Existing SQLite rows have no completed migration");
-                        }
-                    }
-                    try (Statement statement = connection.createStatement()) {
-                        statement.executeUpdate("INSERT INTO storage_meta(key, value) VALUES('schema_version', '1')");
-                    }
-                }
-                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM pending_verifications WHERE expires_at <= ?")) {
-                    statement.setLong(1, Instant.now().getEpochSecond());
-                    statement.executeUpdate();
-                }
-                connection.commit();
-            } catch (Exception e) {
-                connection.rollback();
-                throw e;
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to initialize SQLite storage", e);
-        }
-        return migrated;
+        return transaction("initialize SQLite storage", connection -> {
+            createSchema(connection);
+            boolean migrated = migrateIfNeeded(connection, existingDatabase);
+            deleteExpiredCodes(connection, Instant.now().getEpochSecond());
+            return migrated;
+        });
     }
 
     private Connection connect() throws SQLException {
@@ -92,8 +60,63 @@ public final class SqliteDatabase {
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA busy_timeout=5000");
             statement.execute("PRAGMA foreign_keys=ON");
+            return connection;
+        } catch (SQLException e) {
+            connection.close();
+            throw e;
         }
-        return connection;
+    }
+
+    private interface Transaction<T> { T run(Connection connection) throws Exception; }
+
+    private <T> T transaction(String action, Transaction<T> work) {
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try {
+                T result = work.run(connection);
+                connection.commit();
+                return result;
+            } catch (Exception e) {
+                try { connection.rollback(); }
+                catch (SQLException rollbackFailure) { e.addSuppressed(rollbackFailure); }
+                throw e;
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to " + action, e);
+        }
+    }
+
+    private boolean migrateIfNeeded(Connection connection, boolean existingDatabase) throws Exception {
+        if (migrationComplete(connection)) return false;
+
+        File accountsFile = new File(folder, "verifiedaccounts.json");
+        File hiddenFile = new File(folder, "hiddenplayers.json");
+        if (accountsFile.exists()) {
+            importAccounts(connection, accountsFile);
+            if (hiddenFile.exists()) importHiddenPlayers(connection, hiddenFile);
+            markMigrationComplete(connection);
+            return true;
+        }
+        if (hiddenFile.exists())
+            throw new IllegalStateException("Legacy hidden players exist but verifiedaccounts.json is missing");
+        if (existingDatabase && storedRowCount(connection) != 0)
+            throw new IllegalStateException("Existing SQLite rows have no completed migration");
+
+        markMigrationComplete(connection);
+        return false;
+    }
+
+    private int storedRowCount(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT (SELECT COUNT(*) FROM accounts) + (SELECT COUNT(*) FROM hidden_players)")) {
+            return rows.next() ? rows.getInt(1) : 0;
+        }
+    }
+
+    private void markMigrationComplete(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO storage_meta(key, value) VALUES('schema_version', '1')");
+        }
     }
 
     private void createSchema(Connection connection) throws SQLException {
@@ -171,14 +194,17 @@ public final class SqliteDatabase {
         account.setUsername(result.getString("username"));
         account.setInGameName(result.getString("in_game_name"));
         account.setDiscordID(result.getString("discord_id"));
+        account.setVerifyCode(result.getString("verify_code"));
         account.setOffline(result.getInt("is_offline") != 0);
+        account.markPersisted();
         return account;
     }
 
     public synchronized SDLinkAccount findAccount(String uuid) {
         try (Connection connection = connect();
-             PreparedStatement statement = connection.prepareStatement("SELECT * FROM accounts WHERE uuid = ?")) {
-            statement.setString(1, uuid);
+             PreparedStatement statement = connection.prepareStatement("SELECT a.*, p.code AS verify_code FROM accounts a LEFT JOIN pending_verifications p ON p.account_uuid = a.uuid AND p.expires_at > ? WHERE a.uuid = ?")) {
+            statement.setLong(1, Instant.now().getEpochSecond());
+            statement.setString(2, uuid);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? accountFrom(result) : null;
             }
@@ -187,24 +213,68 @@ public final class SqliteDatabase {
 
     public synchronized List<SDLinkAccount> allAccounts() {
         try (Connection connection = connect();
-             PreparedStatement statement = connection.prepareStatement("SELECT * FROM accounts");
-             ResultSet result = statement.executeQuery()) {
+             PreparedStatement statement = connection.prepareStatement("SELECT a.*, p.code AS verify_code FROM accounts a LEFT JOIN pending_verifications p ON p.account_uuid = a.uuid AND p.expires_at > ?")) {
+            statement.setLong(1, Instant.now().getEpochSecond());
             List<SDLinkAccount> accounts = new ArrayList<>();
-            while (result.next()) accounts.add(accountFrom(result));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) accounts.add(accountFrom(result));
+            }
             return accounts;
         } catch (SQLException e) { throw new IllegalStateException("Failed to load accounts", e); }
     }
 
     public synchronized void upsertAccount(SDLinkAccount account) {
-        try (Connection connection = connect();
-             PreparedStatement statement = connection.prepareStatement("INSERT INTO accounts(uuid, username, in_game_name, discord_id, is_offline) VALUES(?, ?, ?, ?, ?) ON CONFLICT(uuid) DO UPDATE SET username=excluded.username, in_game_name=excluded.in_game_name, is_offline=excluded.is_offline")) {
+        if (account.getUuid() == null || account.getUuid().isBlank())
+            throw new IllegalArgumentException("Account UUID is required");
+        transaction("store account", connection -> {
+            boolean inserted = insertAccountIfMissing(connection, account);
+            if (!inserted) updateAccountFields(connection, account);
+            if (!inserted && account.isDiscordIdChanged()) updateDiscordLink(connection, account);
+            if (account.isVerifyCodeChanged() || (inserted && account.getVerifyCode() != null))
+                replaceCode(connection, account);
+            return null;
+        });
+        account.markPersisted();
+    }
+
+    private boolean insertAccountIfMissing(Connection connection, SDLinkAccount account) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("INSERT OR IGNORE INTO accounts(uuid, username, in_game_name, discord_id, is_offline) VALUES(?, ?, ?, ?, ?)")) {
             statement.setString(1, account.getUuid());
             statement.setString(2, account.getUsername());
             statement.setString(3, account.getInGameName());
             statement.setString(4, account.getDiscordID());
             statement.setInt(5, account.isOffline() ? 1 : 0);
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    private void updateAccountFields(Connection connection, SDLinkAccount account) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE accounts SET username = ?, in_game_name = ?, is_offline = ? WHERE uuid = ?")) {
+            statement.setString(1, account.getUsername());
+            statement.setString(2, account.getInGameName());
+            statement.setInt(3, account.isOffline() ? 1 : 0);
+            statement.setString(4, account.getUuid());
             statement.executeUpdate();
-        } catch (SQLException e) { throw new IllegalStateException("Failed to store account", e); }
+        }
+    }
+
+    private void updateDiscordLink(Connection connection, SDLinkAccount account) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE accounts SET discord_id = ? WHERE uuid = ?")) {
+            statement.setString(1, account.getDiscordID());
+            statement.setString(2, account.getUuid());
+            statement.executeUpdate();
+        }
+    }
+
+    private void replaceCode(Connection connection, SDLinkAccount account) throws SQLException {
+        deleteCode(connection, account.getUuid());
+        if (account.getVerifyCode() == null) return;
+        try (PreparedStatement statement = connection.prepareStatement("INSERT INTO pending_verifications(account_uuid, code, expires_at) VALUES(?, ?, ?)")) {
+            statement.setString(1, account.getUuid());
+            statement.setString(2, account.getVerifyCode());
+            statement.setLong(3, Instant.now().getEpochSecond() + CODE_LIFETIME_SECONDS);
+            statement.executeUpdate();
+        }
     }
 
     public synchronized void deleteAccount(String uuid) {
@@ -216,53 +286,57 @@ public final class SqliteDatabase {
     }
 
     public synchronized String getOrCreateCode(String uuid) {
-        try (Connection connection = connect()) {
-            connection.setAutoCommit(false);
-            try {
-                long now = Instant.now().getEpochSecond();
-                try (PreparedStatement cleanup = connection.prepareStatement("DELETE FROM pending_verifications WHERE expires_at <= ?")) {
-                    cleanup.setLong(1, now);
-                    cleanup.executeUpdate();
-                }
-                try (PreparedStatement find = connection.prepareStatement("SELECT code FROM pending_verifications WHERE account_uuid = ? AND expires_at > ?")) {
-                    find.setString(1, uuid);
-                    find.setLong(2, now);
-                    try (ResultSet result = find.executeQuery()) {
-                        if (result.next()) {
-                            String code = result.getString(1);
-                            connection.commit();
-                            return code;
-                        }
-                    }
-                }
-                try (PreparedStatement delete = connection.prepareStatement("DELETE FROM pending_verifications WHERE account_uuid = ?")) {
-                    delete.setString(1, uuid);
-                    delete.executeUpdate();
-                }
-                try (PreparedStatement insert = connection.prepareStatement("INSERT OR IGNORE INTO pending_verifications(account_uuid, code, expires_at) VALUES(?, ?, ?)")) {
-                    int firstCode = random.nextInt(9000);
-                    for (int attempt = 0; attempt < 9000; attempt++) {
-                        String code = String.valueOf(1000 + (firstCode + attempt) % 9000);
-                        insert.setString(1, uuid);
-                        insert.setString(2, code);
-                        insert.setLong(3, now + CODE_LIFETIME_SECONDS);
-                        if (insert.executeUpdate() == 1) {
-                            connection.commit();
-                            return code;
-                        }
-                    }
-                }
-                throw new IllegalStateException("No verification codes are available");
-            } catch (Exception e) {
-                connection.rollback();
-                throw e;
+        return transaction("issue verification code", connection -> {
+            long now = Instant.now().getEpochSecond();
+            deleteExpiredCodes(connection, now);
+            String currentCode = activeCode(connection, uuid, now);
+            if (currentCode != null) return currentCode;
+            deleteCode(connection, uuid);
+            return insertGeneratedCode(connection, uuid, now + CODE_LIFETIME_SECONDS);
+        });
+    }
+
+    private void deleteExpiredCodes(Connection connection, long now) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("DELETE FROM pending_verifications WHERE expires_at <= ?")) {
+            statement.setLong(1, now);
+            statement.executeUpdate();
+        }
+    }
+
+    private String activeCode(Connection connection, String uuid, long now) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT code FROM pending_verifications WHERE account_uuid = ? AND expires_at > ?")) {
+            statement.setString(1, uuid);
+            statement.setLong(2, now);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString(1) : null;
             }
-        } catch (Exception e) { throw new IllegalStateException("Failed to issue verification code", e); }
+        }
+    }
+
+    private void deleteCode(Connection connection, String uuid) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("DELETE FROM pending_verifications WHERE account_uuid = ?")) {
+            statement.setString(1, uuid);
+            statement.executeUpdate();
+        }
+    }
+
+    private String insertGeneratedCode(Connection connection, String uuid, long expiresAt) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("INSERT OR IGNORE INTO pending_verifications(account_uuid, code, expires_at) VALUES(?, ?, ?)")) {
+            int firstCode = random.nextInt(9000);
+            for (int attempt = 0; attempt < 9000; attempt++) {
+                String code = String.valueOf(1000 + (firstCode + attempt) % 9000);
+                statement.setString(1, uuid);
+                statement.setString(2, code);
+                statement.setLong(3, expiresAt);
+                if (statement.executeUpdate() == 1) return code;
+            }
+        }
+        throw new IllegalStateException("No verification codes are available");
     }
 
     public synchronized SDLinkAccount findAccountByCode(String code) {
         try (Connection connection = connect();
-             PreparedStatement statement = connection.prepareStatement("SELECT a.* FROM accounts a JOIN pending_verifications p ON p.account_uuid = a.uuid WHERE p.code = ? AND p.expires_at > ?")) {
+             PreparedStatement statement = connection.prepareStatement("SELECT a.*, p.code AS verify_code FROM accounts a JOIN pending_verifications p ON p.account_uuid = a.uuid WHERE p.code = ? AND p.expires_at > ?")) {
             statement.setString(1, code);
             statement.setLong(2, Instant.now().getEpochSecond());
             try (ResultSet result = statement.executeQuery()) { return result.next() ? accountFrom(result) : null; }
@@ -270,49 +344,37 @@ public final class SqliteDatabase {
     }
 
     public synchronized LinkStatus linkAccount(String uuid, String discordId, String code, boolean allowMultiple) {
-        try (Connection connection = connect()) {
-            connection.setAutoCommit(false);
-            try {
-                if (code != null) {
-                    try (PreparedStatement check = connection.prepareStatement("SELECT 1 FROM pending_verifications WHERE account_uuid = ? AND code = ? AND expires_at > ?")) {
-                        check.setString(1, uuid);
-                        check.setString(2, code);
-                        check.setLong(3, Instant.now().getEpochSecond());
-                        try (ResultSet result = check.executeQuery()) {
-                            if (!result.next()) {
-                                connection.rollback();
-                                return LinkStatus.CODE_NOT_FOUND;
-                            }
-                        }
-                    }
-                }
-                if (!allowMultiple && code != null) {
-                    try (PreparedStatement check = connection.prepareStatement("SELECT 1 FROM accounts WHERE discord_id = ? LIMIT 1")) {
-                        check.setString(1, discordId);
-                        try (ResultSet result = check.executeQuery()) {
-                            if (result.next()) {
-                                connection.rollback();
-                                return LinkStatus.ALREADY_VERIFIED;
-                            }
-                        }
-                    }
-                }
-                try (PreparedStatement update = connection.prepareStatement("UPDATE accounts SET discord_id = ? WHERE uuid = ?")) {
-                    update.setString(1, discordId);
-                    update.setString(2, uuid);
-                    if (update.executeUpdate() != 1) throw new IllegalStateException("Account disappeared during verification");
-                }
-                try (PreparedStatement delete = connection.prepareStatement("DELETE FROM pending_verifications WHERE account_uuid = ?")) {
-                    delete.setString(1, uuid);
-                    delete.executeUpdate();
-                }
-                connection.commit();
-                return LinkStatus.SUCCESS;
-            } catch (Exception e) {
-                connection.rollback();
-                throw e;
-            }
-        } catch (Exception e) { throw new IllegalStateException("Failed to link account", e); }
+        return transaction("link account", connection -> {
+            if (code != null && !codeIsValid(connection, uuid, code)) return LinkStatus.CODE_NOT_FOUND;
+            if (code != null && !allowMultiple && discordLinked(connection, discordId)) return LinkStatus.ALREADY_VERIFIED;
+            setDiscordLink(connection, uuid, discordId);
+            deleteCode(connection, uuid);
+            return LinkStatus.SUCCESS;
+        });
+    }
+
+    private boolean codeIsValid(Connection connection, String uuid, String code) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM pending_verifications WHERE account_uuid = ? AND code = ? AND expires_at > ?")) {
+            statement.setString(1, uuid);
+            statement.setString(2, code);
+            statement.setLong(3, Instant.now().getEpochSecond());
+            try (ResultSet result = statement.executeQuery()) { return result.next(); }
+        }
+    }
+
+    private boolean discordLinked(Connection connection, String discordId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM accounts WHERE discord_id = ? LIMIT 1")) {
+            statement.setString(1, discordId);
+            try (ResultSet result = statement.executeQuery()) { return result.next(); }
+        }
+    }
+
+    private void setDiscordLink(Connection connection, String uuid, String discordId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE accounts SET discord_id = ? WHERE uuid = ?")) {
+            statement.setString(1, discordId);
+            statement.setString(2, uuid);
+            if (statement.executeUpdate() != 1) throw new IllegalStateException("Account disappeared during verification");
+        }
     }
 
     public synchronized void unlinkAccounts(String discordId) {

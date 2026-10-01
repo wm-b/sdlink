@@ -21,6 +21,23 @@ public final class SDLinkAccount {
     private String discordID;
     private String verifyCode;
     private boolean isOffline;
+    private transient boolean discordIdChanged;
+    private transient boolean verifyCodeChanged;
+
+    public void setDiscordID(String discordID) {
+        this.discordID = discordID;
+        this.discordIdChanged = true;
+    }
+
+    public void setVerifyCode(String verifyCode) {
+        this.verifyCode = verifyCode;
+        this.verifyCodeChanged = true;
+    }
+
+    public void markPersisted() {
+        discordIdChanged = false;
+        verifyCodeChanged = false;
+    }
 
     public String getInGameName() {
         return inGameName == null || inGameName.isEmpty() ? username : inGameName;
