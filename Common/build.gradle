@@ -4,3 +4,15 @@ publishMod.enabled = false
 publishCurseforge.enabled = false
 publishModrinth.enabled = false
 publishNightbloom.enabled = false
+
+compileTestJava.enabled = true
+
+dependencies {
+    testImplementation 'com.google.code.gson:gson:2.11.0'
+}
+
+tasks.register('storageIntegrationTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.hypherionmc.sdlink.core.database.SqliteDatabaseIntegrationTest'
+}

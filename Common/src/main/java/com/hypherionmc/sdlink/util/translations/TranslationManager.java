@@ -22,6 +22,7 @@ public final class TranslationManager {
     public static final TranslationManager INSTANCE = new TranslationManager();
 
     private Map<String, String> translations = Collections.emptyMap();
+    private Map<String, String> defaultTranslations;
     private final Type type = new TypeToken<Map<String, String>>() {}.getType();
     private final Gson gson = new Gson();
 
@@ -142,7 +143,13 @@ public final class TranslationManager {
      * @return The parsed text, or the translation key if the value does not exist
      */
     public String translate(String key) {
-        return translations.getOrDefault(key, key);
+        String translated = translations.get(key);
+        if (translated != null) return translated;
+        if (defaultTranslations == null) {
+            Map<String, String> defaults = loadMapFromResource("assets/sdlink/lang/en_us.json");
+            defaultTranslations = defaults == null ? Collections.emptyMap() : defaults;
+        }
+        return defaultTranslations.getOrDefault(key, key);
     }
 
     /**

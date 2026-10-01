@@ -64,6 +64,7 @@
   "command.verify.missing_code": "You need to provide a verification code",
   "command.verify.already_verified": "Sorry, you already have a verified account and this server does not allow multiple accounts",
   "command.verify.failed": "Sorry, we could not verify your Minecraft account. Please try again",
+  "command.verify.rate_limited": "Too many verification attempts. Please wait 10 minutes before trying again",
 
   "command.verifiedaccounts.help": "View a list of verified Minecraft Accounts",
   "command.verifiedaccounts.title": "Verified Accounts",

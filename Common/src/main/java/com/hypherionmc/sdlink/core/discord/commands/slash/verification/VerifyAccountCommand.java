@@ -8,6 +8,7 @@ import com.hypherionmc.sdlink.api.accounts.MinecraftAccount;
 import com.hypherionmc.sdlink.api.messaging.Result;
 import com.hypherionmc.sdlink.core.config.SDLinkConfig;
 import com.hypherionmc.sdlink.core.database.SDLinkAccount;
+import com.hypherionmc.sdlink.core.discord.VerificationRateLimiter;
 import com.hypherionmc.sdlink.core.discord.commands.slash.SDLinkSlashCommand;
 import com.hypherionmc.sdlink.core.managers.DatabaseManager;
 import com.hypherionmc.sdlink.util.translations.SDText;
@@ -18,7 +19,6 @@ import net.dv8tion.jda.api.interactions.commands.OptionType;
 import net.dv8tion.jda.api.interactions.commands.build.OptionData;
 
 import java.util.Collections;
-import java.util.List;
 
 public final class VerifyAccountCommand extends SDLinkSlashCommand {
 
@@ -46,13 +46,6 @@ public final class VerifyAccountCommand extends SDLinkSlashCommand {
             return;
         }
 
-        List<SDLinkAccount> accounts = DatabaseManager.INSTANCE.findAll(SDLinkAccount.class);
-
-        if (accounts.isEmpty()) {
-            event.getHook().sendMessage(SDText.translate("error.no_db_accounts").toString()).setEphemeral(SDLinkConfig.INSTANCE.botConfig.silentReplies).queue();
-            return;
-        }
-
         Guild guild = event.isFromGuild() ? event.getGuild() : (event.getJDA().getGuilds().isEmpty() ? null : event.getJDA().getGuilds().get(0));
         if (guild == null) {
             event.getHook().sendMessage(SDText.translate("error.no_discord_server").toString()).setEphemeral(SDLinkConfig.INSTANCE.botConfig.silentReplies).queue();
@@ -65,28 +58,21 @@ public final class VerifyAccountCommand extends SDLinkSlashCommand {
             return;
         }
 
-        boolean didVerify = false;
-
-        for (SDLinkAccount account : accounts) {
-            if (account.getVerifyCode() == null)
-                continue;
-
-            if (accounts.stream().anyMatch(a -> a.getDiscordID() != null && a.getDiscordID().equals(m.getId())) && !SDLinkConfig.INSTANCE.accessControl.allowMultipleAccounts) {
-                event.getHook().sendMessage(SDText.translate("command.verify.already_verified").toString()).queue();
-                return;
-            }
-
-            if (account.getVerifyCode().equalsIgnoreCase(String.valueOf(mcCode))) {
-                MinecraftAccount minecraftAccount = MinecraftAccount.of(account);
-                Result result = minecraftAccount.verifyAccount(m, guild);
-                event.getHook().sendMessage(result.getMessage()).setEphemeral(true).queue();
-                didVerify = true;
-                break;
-            }
+        if (!VerificationRateLimiter.INSTANCE.allowAttempt(m.getId())) {
+            event.getHook().sendMessage(SDText.translate("command.verify.rate_limited").toString()).setEphemeral(true).queue();
+            return;
         }
 
-        if (!didVerify)
+        String code = String.valueOf(mcCode);
+        SDLinkAccount account = DatabaseManager.INSTANCE.findAccountByVerificationCode(code);
+        if (account == null) {
             event.getHook().sendMessage(SDText.translate("command.verify.failed").toString()).setEphemeral(SDLinkConfig.INSTANCE.botConfig.silentReplies).queue();
+            return;
+        }
+
+        Result result = MinecraftAccount.of(account).verifyAccount(m, guild, code);
+        if (!result.isError()) VerificationRateLimiter.INSTANCE.clear(m.getId());
+        event.getHook().sendMessage(result.getMessage()).setEphemeral(true).queue();
     }
 
 }

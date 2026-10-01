@@ -7,7 +7,6 @@ import com.hypherionmc.sdlink.api.accounts.MinecraftAccount;
 import com.hypherionmc.sdlink.core.config.SDLinkConfig;
 import com.hypherionmc.sdlink.core.database.SDLinkAccount;
 import com.hypherionmc.sdlink.core.managers.DatabaseManager;
-import com.hypherionmc.sdlink.util.SDLinkUtils;
 import com.hypherionmc.sdlink.util.translations.SDText;
 
 public final class DiscordVerifyCommand {
@@ -35,14 +34,8 @@ public final class DiscordVerifyCommand {
                         return 1;
                     }
 
-                    if (SDLinkUtils.isNullOrEmpty(sdLinkAccount.getVerifyCode())) {
-                        int code = SDLinkUtils.intInRange(1000, 9999);
-                        sdLinkAccount.setVerifyCode(String.valueOf(code));
-                        DatabaseManager.INSTANCE.updateEntry(sdLinkAccount);
-                        ctx.sendSuccess(() -> Text.literal(SDLinkConfig.INSTANCE.accessControl.verificationMessages.optionalVerificationMessage.replace("{code}", String.valueOf(code))), false);
-                    } else {
-                        ctx.sendSuccess(() -> Text.literal(SDLinkConfig.INSTANCE.accessControl.verificationMessages.optionalVerificationMessage.replace("{code}", String.valueOf(sdLinkAccount.getVerifyCode()))), false);
-                    }
+                    String code = DatabaseManager.INSTANCE.getOrCreateVerificationCode(sdLinkAccount.getUuid());
+                    ctx.sendSuccess(() -> Text.literal(SDLinkConfig.INSTANCE.accessControl.verificationMessages.optionalVerificationMessage.replace("{code}", code)), false);
                     return 1;
                 });
 

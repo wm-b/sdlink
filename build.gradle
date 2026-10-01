@@ -69,6 +69,7 @@ subprojects {
         shade("com.github.oshi:oshi-core:${oshi}")
         shade("org.jasypt:jasypt:${jasypt}:lite")
         shade("net.fellbaum:jemoji:1.6.0")
+        shade("org.xerial:sqlite-jdbc:3.53.4.0")
 
         implementation "com.hypherionmc.craterlib:CraterLib-API:${craterlib}"
         implementation "nightbloom:mmode:${maintenance_mode}"
@@ -177,7 +178,9 @@ subprojects {
         exclude "META-INF/*.txt"
         exclude "META-INF/services/com.fasterxml.**"
 
-        minimize()
+        minimize {
+            exclude(dependency('org.xerial:sqlite-jdbc:.*'))
+        }
     }
 
     jar {

@@ -11,6 +11,7 @@ import com.hypherionmc.sdlink.api.messaging.Result;
 import com.hypherionmc.sdlink.compat.rolesync.RoleSync;
 import com.hypherionmc.sdlink.core.config.SDLinkConfig;
 import com.hypherionmc.sdlink.core.database.SDLinkAccount;
+import com.hypherionmc.sdlink.core.database.SqliteDatabase;
 import com.hypherionmc.sdlink.core.discord.BotController;
 import com.hypherionmc.sdlink.core.discord.hooks.DiscordRoleHooks;
 import com.hypherionmc.sdlink.core.managers.CacheManager;
@@ -148,18 +149,26 @@ public final class MinecraftAccount {
     }
 
     public Result verifyAccount(Member member, Guild guild) {
+        return verifyAccount(member, guild, null);
+    }
+
+    public Result verifyAccount(Member member, Guild guild, String code) {
         SDLinkAccount account = getStoredAccount();
 
         if (account == null)
             return Result.error(SDText.translate("account.notfound"));
 
-        account.setDiscordID(member.getId());
-        account.setVerifyCode(null);
-
         try {
-            DatabaseManager.INSTANCE.updateEntry(account);
+            SqliteDatabase.LinkStatus status = DatabaseManager.INSTANCE.linkAccount(
+                    account.getUuid(), member.getId(), code,
+                    code == null || SDLinkConfig.INSTANCE.accessControl.allowMultipleAccounts);
+            if (status == SqliteDatabase.LinkStatus.CODE_NOT_FOUND)
+                return Result.error(SDText.translate("command.verify.failed"));
+            if (status == SqliteDatabase.LinkStatus.ALREADY_VERIFIED)
+                return Result.error(SDText.translate("command.verify.already_verified"));
         } catch (Exception e) {
             BotController.INSTANCE.getLogger().error("Failed to store verified account", e);
+            return Result.error(SDText.translate("command.verify.failed"));
         }
 
         if (!RoleManager.getVerifiedRole().isEmpty()) {
@@ -196,15 +205,11 @@ public final class MinecraftAccount {
 
         List<SDLinkAccount> oldAccounts = List.copyOf(accounts);
 
-        accounts.forEach(a -> {
-            a.setDiscordID(null);
-            a.setVerifyCode(null);
-        });
-
         try {
-            accounts.forEach(DatabaseManager.INSTANCE::updateEntry);
+            DatabaseManager.INSTANCE.unlinkAccounts(member.getId());
         } catch (Exception e) {
             BotController.INSTANCE.getLogger().error("Failed to remove verified account", e);
+            return Result.error(SDText.translate("command.unverify.failed"));
         }
 
         if (!RoleManager.getVerifiedRole().isEmpty()) {
@@ -258,14 +263,8 @@ public final class MinecraftAccount {
             return Result.error(SDText.translate("account.load_failed"));
 
         if (!isAccountVerified() && SDLinkConfig.INSTANCE.accessControl.enabled) {
-            if (SDLinkUtils.isNullOrEmpty(account.getVerifyCode())) {
-                int code = SDLinkUtils.intInRange(1000, 9999);
-                account.setVerifyCode(String.valueOf(code));
-                DatabaseManager.INSTANCE.updateEntry(account);
-                return Result.error(SDLinkConfig.INSTANCE.accessControl.verificationMessages.accountVerify.replace("{code}", String.valueOf(code)));
-            } else {
-                return Result.error(SDLinkConfig.INSTANCE.accessControl.verificationMessages.accountVerify.replace("{code}", account.getVerifyCode()));
-            }
+            String code = DatabaseManager.INSTANCE.getOrCreateVerificationCode(account.getUuid());
+            return Result.error(SDLinkConfig.INSTANCE.accessControl.verificationMessages.accountVerify.replace("{code}", code));
         }
 
         Result result = checkAccessControl();

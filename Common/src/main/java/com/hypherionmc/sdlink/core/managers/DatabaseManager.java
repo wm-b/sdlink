@@ -4,69 +4,79 @@
  */
 package com.hypherionmc.sdlink.core.managers;
 
+import com.hypherionmc.sdlink.SDLinkConstants;
 import com.hypherionmc.sdlink.core.database.HiddenPlayers;
 import com.hypherionmc.sdlink.core.database.SDLinkAccount;
-import com.hypherionmc.sdlink.core.jsondb.JsonDatabase;
-import com.hypherionmc.sdlink.core.jsondb.annotations.Document;
+import com.hypherionmc.sdlink.core.database.SqliteDatabase;
 
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * @author HypherionSA
- * Helper class to initialize the JSON database
+ * Compatibility facade for the two persistent collections.
  */
 public final class DatabaseManager {
 
     public static final DatabaseManager INSTANCE = new DatabaseManager();
 
-    private final JsonDatabase sdlinkDatabase = new JsonDatabase("sdlinkstorage");
+    private final SqliteDatabase database = new SqliteDatabase("sdlinkstorage");
 
-    private final Set<Class<?>> tables = new LinkedHashSet<>() {{
-        add(SDLinkAccount.class);
-        add(HiddenPlayers.class);
-    }};
-
-    DatabaseManager() {
-        sdlinkDatabase.setupDB(tables);
-    }
+    private DatabaseManager() {}
 
     public void initialize() {
-        tables.forEach(t -> sdlinkDatabase.reloadCollection(t.getAnnotation(Document.class).collection(), t));
+        if (database.initialize()) {
+            SDLinkConstants.LOGGER.info("Migrated {} accounts and {} hidden players to SQLite. Legacy JSON files were retained as backups.",
+                    database.allAccounts().size(), database.allHiddenPlayers().size());
+        }
     }
 
-    public void updateEntry(Object t) {
-        sdlinkDatabase.upsert(t);
-        reload(t.getClass());
+    public void updateEntry(Object entry) {
+        if (entry instanceof SDLinkAccount account) database.upsertAccount(account);
+        else if (entry instanceof HiddenPlayers player) database.upsertHiddenPlayer(player);
+        else throw new IllegalArgumentException("Unknown storage type: " + entry.getClass());
     }
 
-    public void deleteEntry(Object t) {
-        sdlinkDatabase.remove(t);
-        reload(t.getClass());
+    public void deleteEntry(Object entry) {
+        if (entry instanceof SDLinkAccount account) database.deleteAccount(account.getUuid());
+        else if (entry instanceof HiddenPlayers player) database.deleteHiddenPlayer(player.getIdentifier());
+        else throw new IllegalArgumentException("Unknown storage type: " + entry.getClass());
     }
 
-    public void deleteEntry(Object t, Class<?> clazz) {
-        sdlinkDatabase.remove(t);
-        reload(t.getClass());
+    public void deleteEntry(Object entry, Class<?> ignored) {
+        deleteEntry(entry);
     }
 
-    private void reload(Class<?> clazz) {
-        sdlinkDatabase.reloadCollection(clazz.getAnnotation(Document.class).collection(), clazz);
-    }
-
+    @SuppressWarnings("unchecked")
     public <T> T findById(Object id, Class<T> entityClass) {
-        reload(entityClass);
-        return sdlinkDatabase.findById(id, entityClass);
+        if (entityClass == SDLinkAccount.class) return entityClass.cast(database.findAccount(String.valueOf(id)));
+        if (entityClass == HiddenPlayers.class) return entityClass.cast(database.findHiddenPlayer(String.valueOf(id)));
+        throw new IllegalArgumentException("Unknown storage type: " + entityClass);
     }
 
+    @SuppressWarnings("unchecked")
     public <T> List<T> getCollection(Class<T> entityClass) {
-        reload(entityClass);
-        return sdlinkDatabase.getCollection(entityClass);
+        if (entityClass == SDLinkAccount.class) return (List<T>) database.allAccounts();
+        if (entityClass == HiddenPlayers.class) return (List<T>) database.allHiddenPlayers();
+        throw new IllegalArgumentException("Unknown storage type: " + entityClass);
     }
 
     public <T> List<T> findAll(Class<T> tClass) {
-        reload(tClass);
-        return sdlinkDatabase.getCollection(tClass);
+        return getCollection(tClass);
+    }
+
+    public String getOrCreateVerificationCode(String uuid) {
+        return database.getOrCreateCode(uuid);
+    }
+
+    public SDLinkAccount findAccountByVerificationCode(String code) {
+        return database.findAccountByCode(code);
+    }
+
+    public SqliteDatabase.LinkStatus linkAccount(String uuid, String discordId, String code, boolean allowMultiple) {
+        return database.linkAccount(uuid, discordId, code, allowMultiple);
+    }
+
+    public void unlinkAccounts(String discordId) {
+        database.unlinkAccounts(discordId);
     }
 }
